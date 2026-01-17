@@ -444,14 +444,25 @@ def _render_client_png_download(
     plot_index: int,
     manual_legend: bool,
     legend_font_size_px: int,
+    auto_start: bool = False,
+    show_button: bool = True,
 ):
     fig_json = _fig_to_svg_safe_json(fig)
     dom_id = hashlib.sha1(f"{filename}|{width_px}|{height_px}|{scale}".encode("utf-8")).hexdigest()[:12]
+    button_html = (
+        f"""
+       <button id="btn-{dom_id}" style="padding:6px 10px; font-size: 0.9rem; cursor:pointer;">
+         {button_label}
+       </button>
+        """.rstrip()
+        if show_button
+        else ""
+    )
+    auto_start_js = "doExport();" if auto_start else ""
+    bind_js = f'document.getElementById("btn-{dom_id}").addEventListener("click", doExport);' if show_button else ""
     html = f"""
     <div id="exp-{dom_id}">
-      <button id="btn-{dom_id}" style="padding:6px 10px; font-size: 0.9rem; cursor:pointer;">
-        {button_label}
-      </button>
+      {button_html}
       <div id="plot-{dom_id}" style="width:{int(width_px)}px; height:{int(height_px)}px; display:none;"></div>
       <div id="msg-{dom_id}" style="font-size:0.8rem; color:#666; margin-top:6px;"></div>
     </div>
@@ -669,7 +680,8 @@ def _render_client_png_download(
         }}
       }}
 
-      document.getElementById("btn-{dom_id}").addEventListener("click", doExport);
+      {bind_js}
+      {auto_start_js}
     </script>
     """
     # Height is just for the button+status text (plot div is hidden)
@@ -722,38 +734,14 @@ def main():
         legend_entrywidth = st.sidebar.slider("Legend column width (px)", min_value=50, max_value=300, value=180, step=10)
 
     st.sidebar.subheader("Download (Full Legend)")
-    st.session_state.setdefault("export_fulllegend_x", True)
-    st.session_state.setdefault("export_fulllegend_r", False)
-    st.session_state.setdefault("export_fulllegend_xr", False)
-    st.session_state.setdefault("export_fulllegend_enable_browser", True)
-    st.session_state.setdefault("export_fulllegend_manual_legend", True)
-    st.session_state.setdefault("export_fulllegend_font_size_px", EXPORT_LEGEND_FONT_SIZE_PX_DEFAULT)
-
-    export_x = st.sidebar.checkbox("X", value=bool(st.session_state["export_fulllegend_x"]), key="export_fulllegend_x")
-    export_r = st.sidebar.checkbox("R", value=bool(st.session_state["export_fulllegend_r"]), key="export_fulllegend_r")
-    export_xr = st.sidebar.checkbox("X/R", value=bool(st.session_state["export_fulllegend_xr"]), key="export_fulllegend_xr")
-    enable_browser_export = st.sidebar.checkbox(
-        "Enable browser PNG download",
-        value=bool(st.session_state["export_fulllegend_enable_browser"]),
-        help="Uses Plotly.js in the browser (works on Streamlit Cloud; requires access to https://cdn.plot.ly).",
-        key="export_fulllegend_enable_browser",
-    )
-    export_manual_legend = st.sidebar.checkbox(
-        "Export legend as text (recommended)",
-        value=bool(st.session_state["export_fulllegend_manual_legend"]),
-        help="Disables Plotly's interactive legend during export and draws a full legend as text (avoids clipping/scroll issues).",
-        key="export_fulllegend_manual_legend",
-    )
-    export_legend_font_size_px = st.sidebar.slider(
-        "Export legend font size (px)",
-        min_value=8,
-        max_value=16,
-        value=int(st.session_state["export_fulllegend_font_size_px"]),
-        step=1,
-        key="export_fulllegend_font_size_px",
-    )
-    if enable_browser_export and not (export_x or export_r or export_xr):
-        st.sidebar.warning("Select at least one plot to export.")
+    st.sidebar.caption("Browser PNG download (requires access to https://cdn.plot.ly).")
+    export_buttons = st.sidebar.columns(3)
+    if export_buttons[0].button("X PNG", key="export_fulllegend_btn_x"):
+        st.session_state["export_request"] = "x"
+    if export_buttons[1].button("R PNG", key="export_fulllegend_btn_r"):
+        st.session_state["export_request"] = "r"
+    if export_buttons[2].button("X/R PNG", key="export_fulllegend_btn_xr"):
+        st.session_state["export_request"] = "xr"
     download_config = {
         "toImageButtonOptions": {
             "format": "png",
@@ -854,38 +842,34 @@ def main():
     if xr_total > 0 and xr_dropped > 0:
         st.caption(f"X/R: dropped {xr_dropped} of {xr_total} points where |R| < 1e-9 or data missing.")
 
-    # Top download buttons (controls remain in the sidebar).
     export_scale = 4
     export_width_px = int(figure_width_px) if not use_auto_width else -1
 
-    if enable_browser_export:
-        selections = []
-        if export_x:
-            selections.append(("Download X PNG (full legend)", fig_x, "X_full_legend.png", 0))
-        if export_r:
-            selections.append(("Download R PNG (full legend)", fig_r, "R_full_legend.png", 1))
-        if export_xr:
-            selections.append(("Download X/R PNG (full legend)", fig_xr, "X_over_R_full_legend.png", 2))
-        if not selections:
-            st.warning("Select at least one plot to export.")
-        else:
-            cols = st.columns(len(selections))
-            for col, (label, fig_src, fname, idx) in zip(cols, selections):
-                with col:
-                    fig_export = _build_export_figure(fig_src, plot_height, export_width_px, legend_entrywidth)
-                    _render_client_png_download(
-                        fig_export,
-                        filename=fname,
-                        width_px=export_width_px,
-                        height_px=int(fig_export.layout.height or 800),
-                        scale=export_scale,
-                        button_label=label,
-                        plot_height=plot_height,
-                        legend_entrywidth=legend_entrywidth,
-                        plot_index=idx,
-                        manual_legend=export_manual_legend,
-                        legend_font_size_px=export_legend_font_size_px,
-                    )
+    req = st.session_state.pop("export_request", None)
+    if req in {"x", "r", "xr"}:
+        fig_src, fname, idx = (
+            (fig_x, "X_full_legend.png", 0)
+            if req == "x"
+            else (fig_r, "R_full_legend.png", 1)
+            if req == "r"
+            else (fig_xr, "X_over_R_full_legend.png", 2)
+        )
+        fig_export = _build_export_figure(fig_src, plot_height, export_width_px, legend_entrywidth)
+        _render_client_png_download(
+            fig_export,
+            filename=fname,
+            width_px=export_width_px,
+            height_px=int(fig_export.layout.height or 800),
+            scale=export_scale,
+            button_label="Downloading…",
+            plot_height=plot_height,
+            legend_entrywidth=legend_entrywidth,
+            plot_index=idx,
+            manual_legend=True,
+            legend_font_size_px=EXPORT_LEGEND_FONT_SIZE_PX_DEFAULT,
+            auto_start=True,
+            show_button=False,
+        )
 
     st.plotly_chart(fig_x, use_container_width=bool(use_auto_width), config=download_config)
     st.markdown("<div style='height:36px'></div>", unsafe_allow_html=True)
