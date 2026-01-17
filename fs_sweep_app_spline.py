@@ -925,18 +925,42 @@ def main():
     if xr_total > 0 and xr_dropped > 0:
         st.caption(f"X/R: dropped {xr_dropped} of {xr_total} points where |R| < 1e-9 or data missing.")
 
-    # Read export settings from session state so the download button can be rendered here even if
-    # the sidebar widgets are created later in the script.
-    enable_browser_export = bool(st.session_state.get("export_fulllegend_enable_browser", True))
-    export_x = bool(st.session_state.get("export_fulllegend_x", True))
-    export_r = bool(st.session_state.get("export_fulllegend_r", False))
-    export_xr = bool(st.session_state.get("export_fulllegend_xr", False))
-    export_manual_legend = bool(st.session_state.get("export_fulllegend_manual_legend", True))
-    export_legend_font_size_px = int(st.session_state.get("export_fulllegend_font_size_px", EXPORT_LEGEND_FONT_SIZE_PX_DEFAULT))
+    st.plotly_chart(fig_x, use_container_width=bool(use_auto_width), config=download_config)
+    st.markdown("<div style='height:36px'></div>", unsafe_allow_html=True)
+    st.plotly_chart(fig_r, use_container_width=bool(use_auto_width), config=download_config)
+    st.markdown("<div style='height:36px'></div>", unsafe_allow_html=True)
+    st.plotly_chart(fig_xr, use_container_width=bool(use_auto_width), config=download_config)
 
-    # Download button(s) near the top (controls stay in the sidebar).
+    st.sidebar.header("Download (Full Legend)")
+    export_scale = 4
+    export_width_px = int(figure_width_px) if not use_auto_width else -1
+
+    export_x = st.sidebar.checkbox("X", value=True, key="export_fulllegend_x")
+    export_r = st.sidebar.checkbox("R", value=False, key="export_fulllegend_r")
+    export_xr = st.sidebar.checkbox("X/R", value=False, key="export_fulllegend_xr")
+    enable_browser_export = st.sidebar.checkbox(
+        "Enable browser PNG download",
+        value=False,
+        help="Uses Plotly.js in the browser (works on Streamlit Cloud; requires access to https://cdn.plot.ly).",
+        key="export_fulllegend_enable_browser",
+    )
+    export_manual_legend = st.sidebar.checkbox(
+        "Export legend as text (recommended)",
+        value=True,
+        help="Disables Plotly's interactive legend during export and draws a full legend as text (avoids clipping/scroll issues).",
+        key="export_fulllegend_manual_legend",
+    )
+    export_legend_font_size_px = st.sidebar.slider(
+        "Export legend font size (px)",
+        min_value=8,
+        max_value=16,
+        value=EXPORT_LEGEND_FONT_SIZE_PX_DEFAULT,
+        step=1,
+    )
+
     if enable_browser_export and not (export_x or export_r or export_xr):
-        st.warning("Select at least one plot to export.")
+        st.sidebar.warning("Select at least one plot to export.")
+
     if enable_browser_export and export_x:
         fig_x_export = _build_export_figure(fig_x, plot_height, export_width_px, legend_entrywidth)
         _render_client_png_download(
@@ -982,40 +1006,6 @@ def main():
             manual_legend=export_manual_legend,
             legend_font_size_px=export_legend_font_size_px,
         )
-
-    st.plotly_chart(fig_x, use_container_width=bool(use_auto_width), config=download_config)
-    st.markdown("<div style='height:36px'></div>", unsafe_allow_html=True)
-    st.plotly_chart(fig_r, use_container_width=bool(use_auto_width), config=download_config)
-    st.markdown("<div style='height:36px'></div>", unsafe_allow_html=True)
-    st.plotly_chart(fig_xr, use_container_width=bool(use_auto_width), config=download_config)
-
-    # Download controls (sidebar): enabling the browser exporter does not run Plotly.js until you click a download button.
-    export_scale = 4
-    export_width_px = int(figure_width_px) if not use_auto_width else -1
-
-    st.sidebar.header("Download (Full Legend)")
-    export_x = st.sidebar.checkbox("X", value=True, key="export_fulllegend_x")
-    export_r = st.sidebar.checkbox("R", value=False, key="export_fulllegend_r")
-    export_xr = st.sidebar.checkbox("X/R", value=False, key="export_fulllegend_xr")
-    enable_browser_export = st.sidebar.checkbox(
-        "Enable browser PNG download",
-        value=True,
-        help="Uses Plotly.js in the browser (works on Streamlit Cloud; requires access to https://cdn.plot.ly).",
-        key="export_fulllegend_enable_browser",
-    )
-    export_manual_legend = st.sidebar.checkbox(
-        "Export legend as text (recommended)",
-        value=True,
-        help="Disables Plotly's interactive legend during export and draws a full legend as text (avoids clipping/scroll issues).",
-        key="export_fulllegend_manual_legend",
-    )
-    export_legend_font_size_px = st.sidebar.slider(
-        "Export legend font size (px)",
-        min_value=8,
-        max_value=16,
-        value=EXPORT_LEGEND_FONT_SIZE_PX_DEFAULT,
-        step=1,
-    )
 
 
 if __name__ == "__main__":
