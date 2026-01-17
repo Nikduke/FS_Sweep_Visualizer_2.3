@@ -91,6 +91,9 @@ def load_fs_sweep_xlsx(path_or_buf) -> Dict[str, pd.DataFrame]:
             df = df.rename(columns={freq_col: "Frequency (Hz)"})
             df["Frequency (Hz)"] = pd.to_numeric(df["Frequency (Hz)"], errors="coerce")
             df = df.dropna(subset=["Frequency (Hz)"])
+            value_cols = [c for c in df.columns if c != "Frequency (Hz)"]
+            if value_cols:
+                df[value_cols] = df[value_cols].apply(pd.to_numeric, errors="coerce")
             dfs[name] = df
     return dfs
 
@@ -114,6 +117,7 @@ def display_case_name(name: str) -> str:
     return base
 
 
+@st.cache_data(show_spinner=False)
 def split_case_parts(cases: List[str]) -> Tuple[List[List[str]], List[str]]:
     if not cases:
         return [], []
@@ -209,7 +213,10 @@ def compute_common_n_range(f_series: List[pd.Series], f_base: float) -> Tuple[fl
     for s in f_series:
         if s is None:
             continue
-        v = pd.to_numeric(s, errors="coerce").dropna()
+        v = s
+        if not pd.api.types.is_numeric_dtype(v):
+            v = pd.to_numeric(v, errors="coerce")
+        v = v.dropna()
         if not v.empty:
             vals.extend([v.min() / f_base, v.max() / f_base])
     if not vals:
@@ -247,14 +254,17 @@ def make_spline_traces(
     if df is None:
         return [], None
     f = df["Frequency (Hz)"]
-    n = f / f_base
+    cd = f.to_numpy()
+    n = cd / float(f_base)
     traces: List[BaseTraceType] = []
     TraceCls = go.Scatter if enable_spline else go.Scattergl
-    for idx, case in enumerate(cases):
+    for case in cases:
         if case not in df.columns:
             continue
-        y = pd.to_numeric(df[case], errors="coerce")
-        cd = f.values
+        y_s = df[case]
+        if not pd.api.types.is_numeric_dtype(y_s):
+            y_s = pd.to_numeric(y_s, errors="coerce")
+        y = y_s.to_numpy()
         color = case_colors.get(case)
         tr = TraceCls(
             x=n,
@@ -350,15 +360,22 @@ def build_x_over_r_spline(df_r: Optional[pd.DataFrame], df_x: Optional[pd.DataFr
     if df_r is not None and df_x is not None:
         both = [c for c in cases if c in df_r.columns and c in df_x.columns]
         f_series = df_r["Frequency (Hz)"]
-        n = f_series / f_base
+        cd = f_series.to_numpy()
+        n = cd / float(f_base)
         for case in both:
-            r = pd.to_numeric(df_r[case], errors="coerce")
-            x = pd.to_numeric(df_x[case], errors="coerce")
-            denom_ok = r.abs() >= eps
-            y = pd.Series(np.where(denom_ok, x / r, np.nan))
-            xr_dropped += int((~denom_ok | r.isna() | x.isna()).sum())
-            xr_total += int(len(r))
-            cd = f_series.values
+            r_s = df_r[case]
+            x_s = df_x[case]
+            if not pd.api.types.is_numeric_dtype(r_s):
+                r_s = pd.to_numeric(r_s, errors="coerce")
+            if not pd.api.types.is_numeric_dtype(x_s):
+                x_s = pd.to_numeric(x_s, errors="coerce")
+            r = r_s.to_numpy()
+            x = x_s.to_numpy()
+            denom_ok = np.abs(r) >= eps
+            bad = (~denom_ok) | np.isnan(r) | np.isnan(x)
+            y = np.where(denom_ok, x / r, np.nan)
+            xr_dropped += int(np.count_nonzero(bad))
+            xr_total += int(r.size)
             color = case_colors.get(case)
             tr = TraceCls(
                 x=n,
@@ -378,126 +395,6 @@ def build_x_over_r_spline(df_r: Optional[pd.DataFrame], df_x: Optional[pd.DataFr
     y_title = "X1/R1 (unitless)" if seq_label == "Positive" else "X0/R0 (unitless)"
     apply_common_layout(fig, plot_height, y_title, legend_entrywidth, len(fig.data), use_auto_width, figure_width_px)
     return fig, f_series, xr_dropped, xr_total
-
-
-def render_plotly_with_auto_legend(figs: List[go.Figure], config: dict, key: str):
-    figs_json = [f.to_plotly_json() for f in figs]
-    payload = {
-        "figs": figs_json,
-        "config": config,
-        "spacing": 24,
-    }
-    payload_json = json.dumps(payload, cls=PlotlyJSONEncoder)
-
-    # Note: `components.html` renders inside an iframe. We adjust the iframe height by posting
-    # `streamlit:setFrameHeight` messages after computing the final Plotly heights.
-    html = f"""
-    <div id="root" style="font-family: sans-serif; color: #666;">Loading plots…</div>
-    <script type="application/json" id="payload">{payload_json}</script>
-    <script>
-      const payload = JSON.parse(document.getElementById("payload").textContent);
-      const root = document.getElementById("root");
-      const spacing = payload.spacing || 0;
-      const cfg = payload.config || {{}};
-
-      function ensurePlotlyLoaded() {{
-        if (window.Plotly) return Promise.resolve(window.Plotly);
-        return new Promise((resolve, reject) => {{
-          const script = document.createElement("script");
-          script.src = "https://cdn.plot.ly/plotly-2.30.0.min.js";
-          script.async = true;
-          script.onload = () => resolve(window.Plotly);
-          script.onerror = () => reject(new Error("Failed to load Plotly from CDN"));
-          document.head.appendChild(script);
-        }});
-      }}
-
-      function setFrameHeight(px) {{
-        window.parent.postMessage({{
-          isStreamlitMessage: true,
-          type: "streamlit:setFrameHeight",
-          height: px
-        }}, "*");
-      }}
-
-      function measureLegendHeight(gd) {{
-        const legend = gd.querySelector(".legend");
-        if (!legend) return 0;
-        const rect = legend.getBoundingClientRect();
-        return Math.ceil(rect.height || 0);
-      }}
-
-      function computeDesired(gd) {{
-        const legendH = measureLegendHeight(gd);
-        if (gd.__baseHeight === undefined) {{
-          gd.__baseHeight = (gd.layout && gd.layout.height) ? gd.layout.height : 0;
-          gd.__baseBottom = (gd.layout && gd.layout.margin && gd.layout.margin.b) ? gd.layout.margin.b : 0;
-        }}
-        const bottom = gd.__baseBottom + legendH;
-        const totalH = gd.__baseHeight + legendH;
-        return {{ bottom, totalH }};
-      }}
-
-      function applyAutoLegendSize(gd) {{
-        const {{ bottom, totalH }} = computeDesired(gd);
-        const currentH = (gd._fullLayout && gd._fullLayout.height) ? gd._fullLayout.height : (gd.layout && gd.layout.height) || 0;
-        const currentB = (gd._fullLayout && gd._fullLayout.margin) ? gd._fullLayout.margin.b : (gd.layout && gd.layout.margin && gd.layout.margin.b) || 0;
-        if (Math.abs(currentH - totalH) <= 1 && Math.abs(currentB - bottom) <= 1) return Promise.resolve();
-        return Plotly.relayout(gd, {{
-          "height": totalH,
-          "margin.b": bottom
-        }});
-      }}
-
-      async function renderAll() {{
-        let Plotly;
-        try {{
-          Plotly = await ensurePlotlyLoaded();
-        }} catch (e) {{
-          root.innerHTML =
-            "<div style='color:#b00020'>Plotly could not be loaded inside the component iframe.</div>" +
-            "<div style='color:#666'>If you are offline or your network blocks cdn.plot.ly, we need an offline loader fallback.</div>";
-          return;
-        }}
-
-        root.innerHTML = "";
-        const plots = [];
-        for (let i = 0; i < payload.figs.length; i++) {{
-          const container = document.createElement("div");
-          container.id = "plot-" + i;
-          container.style.marginBottom = (i === payload.figs.length - 1) ? "0px" : (spacing + "px");
-          root.appendChild(container);
-
-          const fig = payload.figs[i];
-          await Plotly.newPlot(container, fig.data, fig.layout, cfg);
-          plots.push(container);
-        }}
-
-        // Apply sizing twice (Plotly may refine layout after first relayout).
-        for (const gd of plots) {{
-          await applyAutoLegendSize(gd);
-        }}
-        for (const gd of plots) {{
-          await applyAutoLegendSize(gd);
-        }}
-
-        // Resize iframe to fit all plots.
-        let total = 0;
-        for (const gd of plots) {{
-          const rect = gd.getBoundingClientRect();
-          total += Math.ceil(rect.height || 0);
-        }}
-        total += Math.max(0, plots.length - 1) * spacing;
-        setFrameHeight(total + 4);
-      }}
-
-      renderAll();
-    </script>
-    """
-
-    # Provide a reasonable fallback height + scrolling in case `streamlit:setFrameHeight` messaging is blocked.
-    fallback_height = max(400, int(sum((f.layout.height or 0) for f in figs) + (len(figs) - 1) * 24))
-    components.html(html, height=fallback_height, scrolling=True)
 
 
 def _build_export_figure(fig: go.Figure, plot_height: int, width_px: int, legend_entrywidth: int) -> go.Figure:
@@ -823,6 +720,40 @@ def main():
     legend_entrywidth = 180
     if not auto_legend_entrywidth:
         legend_entrywidth = st.sidebar.slider("Legend column width (px)", min_value=50, max_value=300, value=180, step=10)
+
+    st.sidebar.subheader("Download (Full Legend)")
+    st.session_state.setdefault("export_fulllegend_x", True)
+    st.session_state.setdefault("export_fulllegend_r", False)
+    st.session_state.setdefault("export_fulllegend_xr", False)
+    st.session_state.setdefault("export_fulllegend_enable_browser", True)
+    st.session_state.setdefault("export_fulllegend_manual_legend", True)
+    st.session_state.setdefault("export_fulllegend_font_size_px", EXPORT_LEGEND_FONT_SIZE_PX_DEFAULT)
+
+    export_x = st.sidebar.checkbox("X", value=bool(st.session_state["export_fulllegend_x"]), key="export_fulllegend_x")
+    export_r = st.sidebar.checkbox("R", value=bool(st.session_state["export_fulllegend_r"]), key="export_fulllegend_r")
+    export_xr = st.sidebar.checkbox("X/R", value=bool(st.session_state["export_fulllegend_xr"]), key="export_fulllegend_xr")
+    enable_browser_export = st.sidebar.checkbox(
+        "Enable browser PNG download",
+        value=bool(st.session_state["export_fulllegend_enable_browser"]),
+        help="Uses Plotly.js in the browser (works on Streamlit Cloud; requires access to https://cdn.plot.ly).",
+        key="export_fulllegend_enable_browser",
+    )
+    export_manual_legend = st.sidebar.checkbox(
+        "Export legend as text (recommended)",
+        value=bool(st.session_state["export_fulllegend_manual_legend"]),
+        help="Disables Plotly's interactive legend during export and draws a full legend as text (avoids clipping/scroll issues).",
+        key="export_fulllegend_manual_legend",
+    )
+    export_legend_font_size_px = st.sidebar.slider(
+        "Export legend font size (px)",
+        min_value=8,
+        max_value=16,
+        value=int(st.session_state["export_fulllegend_font_size_px"]),
+        step=1,
+        key="export_fulllegend_font_size_px",
+    )
+    if enable_browser_export and not (export_x or export_r or export_xr):
+        st.sidebar.warning("Select at least one plot to export.")
     download_config = {
         "toImageButtonOptions": {
             "format": "png",
@@ -830,8 +761,6 @@ def main():
             "scale": 4,
         }
     }
-    if not enable_spline:
-        download_config["modeBarButtonsToRemove"] = ["toImage"]
 
     # Cases / filters
     df_r = data.get(seq[0])
@@ -925,87 +854,44 @@ def main():
     if xr_total > 0 and xr_dropped > 0:
         st.caption(f"X/R: dropped {xr_dropped} of {xr_total} points where |R| < 1e-9 or data missing.")
 
+    # Top download buttons (controls remain in the sidebar).
+    export_scale = 4
+    export_width_px = int(figure_width_px) if not use_auto_width else -1
+
+    if enable_browser_export:
+        selections = []
+        if export_x:
+            selections.append(("Download X PNG (full legend)", fig_x, "X_full_legend.png", 0))
+        if export_r:
+            selections.append(("Download R PNG (full legend)", fig_r, "R_full_legend.png", 1))
+        if export_xr:
+            selections.append(("Download X/R PNG (full legend)", fig_xr, "X_over_R_full_legend.png", 2))
+        if not selections:
+            st.warning("Select at least one plot to export.")
+        else:
+            cols = st.columns(len(selections))
+            for col, (label, fig_src, fname, idx) in zip(cols, selections):
+                with col:
+                    fig_export = _build_export_figure(fig_src, plot_height, export_width_px, legend_entrywidth)
+                    _render_client_png_download(
+                        fig_export,
+                        filename=fname,
+                        width_px=export_width_px,
+                        height_px=int(fig_export.layout.height or 800),
+                        scale=export_scale,
+                        button_label=label,
+                        plot_height=plot_height,
+                        legend_entrywidth=legend_entrywidth,
+                        plot_index=idx,
+                        manual_legend=export_manual_legend,
+                        legend_font_size_px=export_legend_font_size_px,
+                    )
+
     st.plotly_chart(fig_x, use_container_width=bool(use_auto_width), config=download_config)
     st.markdown("<div style='height:36px'></div>", unsafe_allow_html=True)
     st.plotly_chart(fig_r, use_container_width=bool(use_auto_width), config=download_config)
     st.markdown("<div style='height:36px'></div>", unsafe_allow_html=True)
     st.plotly_chart(fig_xr, use_container_width=bool(use_auto_width), config=download_config)
-
-    st.sidebar.header("Download (Full Legend)")
-    export_scale = 4
-    export_width_px = int(figure_width_px) if not use_auto_width else -1
-
-    export_x = st.sidebar.checkbox("X", value=True, key="export_fulllegend_x")
-    export_r = st.sidebar.checkbox("R", value=False, key="export_fulllegend_r")
-    export_xr = st.sidebar.checkbox("X/R", value=False, key="export_fulllegend_xr")
-    enable_browser_export = st.sidebar.checkbox(
-        "Enable browser PNG download",
-        value=True,
-        help="Uses Plotly.js in the browser (works on Streamlit Cloud; requires access to https://cdn.plot.ly).",
-        key="export_fulllegend_enable_browser",
-    )
-    export_manual_legend = st.sidebar.checkbox(
-        "Export legend as text (recommended)",
-        value=True,
-        help="Disables Plotly's interactive legend during export and draws a full legend as text (avoids clipping/scroll issues).",
-        key="export_fulllegend_manual_legend",
-    )
-    export_legend_font_size_px = st.sidebar.slider(
-        "Export legend font size (px)",
-        min_value=8,
-        max_value=16,
-        value=EXPORT_LEGEND_FONT_SIZE_PX_DEFAULT,
-        step=1,
-    )
-
-    if enable_browser_export and not (export_x or export_r or export_xr):
-        st.sidebar.warning("Select at least one plot to export.")
-
-    if enable_browser_export and export_x:
-        fig_x_export = _build_export_figure(fig_x, plot_height, export_width_px, legend_entrywidth)
-        _render_client_png_download(
-            fig_x_export,
-            filename="X_full_legend.png",
-            width_px=export_width_px,
-            height_px=int(fig_x_export.layout.height or 800),
-            scale=export_scale,
-            button_label="Download X PNG (full legend)",
-            plot_height=plot_height,
-            legend_entrywidth=legend_entrywidth,
-            plot_index=0,
-            manual_legend=export_manual_legend,
-            legend_font_size_px=export_legend_font_size_px,
-        )
-    if enable_browser_export and export_r:
-        fig_r_export = _build_export_figure(fig_r, plot_height, export_width_px, legend_entrywidth)
-        _render_client_png_download(
-            fig_r_export,
-            filename="R_full_legend.png",
-            width_px=export_width_px,
-            height_px=int(fig_r_export.layout.height or 800),
-            scale=export_scale,
-            button_label="Download R PNG (full legend)",
-            plot_height=plot_height,
-            legend_entrywidth=legend_entrywidth,
-            plot_index=1,
-            manual_legend=export_manual_legend,
-            legend_font_size_px=export_legend_font_size_px,
-        )
-    if enable_browser_export and export_xr:
-        fig_xr_export = _build_export_figure(fig_xr, plot_height, export_width_px, legend_entrywidth)
-        _render_client_png_download(
-            fig_xr_export,
-            filename="X_over_R_full_legend.png",
-            width_px=export_width_px,
-            height_px=int(fig_xr_export.layout.height or 800),
-            scale=export_scale,
-            button_label="Download X/R PNG (full legend)",
-            plot_height=plot_height,
-            legend_entrywidth=legend_entrywidth,
-            plot_index=2,
-            manual_legend=export_manual_legend,
-            legend_font_size_px=export_legend_font_size_px,
-        )
 
 
 if __name__ == "__main__":
