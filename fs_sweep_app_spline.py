@@ -940,7 +940,7 @@ def main():
     export_xr = st.sidebar.checkbox("X/R", value=False, key="export_fulllegend_xr")
     enable_browser_export = st.sidebar.checkbox(
         "Enable browser PNG download",
-        value=False,
+        value=True,
         help="Uses Plotly.js in the browser (works on Streamlit Cloud; requires access to https://cdn.plot.ly).",
         key="export_fulllegend_enable_browser",
     )
